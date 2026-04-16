@@ -107,6 +107,9 @@ def main():
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--val-split", type=float, default=0.2)
     parser.add_argument("--train-dir", default=SPEC_DIR)
+    parser.add_argument("--val-dir", default=None,
+                        help="Held-out validation spectrograms dir. "
+                             "If not set, uses a random split of the train set.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -122,20 +125,38 @@ def main():
         print(f"\nError: {args.train_dir} not found. Run spectrogram.py first.")
         return
 
-    full_dataset = datasets.ImageFolder(args.train_dir, transform=get_transforms(True))
-    val_dataset = datasets.ImageFolder(args.train_dir, transform=get_transforms(False))
-    class_to_idx = full_dataset.class_to_idx
+    if args.val_dir:
+        if not os.path.exists(args.val_dir):
+            print(f"\nError: --val-dir {args.val_dir} not found.")
+            return
 
-    val_size = int(len(full_dataset) * args.val_split)
-    train_size = len(full_dataset) - val_size
+        train_full = datasets.ImageFolder(args.train_dir, transform=get_transforms(True))
+        val_full = datasets.ImageFolder(args.val_dir, transform=get_transforms(False))
 
-    train_indices, val_indices = random_split(
-        range(len(full_dataset)), [train_size, val_size],
-        generator=torch.Generator().manual_seed(42),
-    )
+        if train_full.class_to_idx != val_full.class_to_idx:
+            print("\nError: train/val class sets differ.")
+            return
 
-    train_subset = torch.utils.data.Subset(full_dataset, train_indices)
-    val_subset = torch.utils.data.Subset(val_dataset, val_indices)
+        class_to_idx = train_full.class_to_idx
+        train_subset = train_full
+        val_subset = val_full
+        split_mode = f"held-out ({os.path.basename(args.val_dir)})"
+    else:
+        full_dataset = datasets.ImageFolder(args.train_dir, transform=get_transforms(True))
+        val_dataset = datasets.ImageFolder(args.train_dir, transform=get_transforms(False))
+        class_to_idx = full_dataset.class_to_idx
+
+        val_size = int(len(full_dataset) * args.val_split)
+        train_size = len(full_dataset) - val_size
+
+        train_indices, val_indices = random_split(
+            range(len(full_dataset)), [train_size, val_size],
+            generator=torch.Generator().manual_seed(42),
+        )
+
+        train_subset = torch.utils.data.Subset(full_dataset, train_indices)
+        val_subset = torch.utils.data.Subset(val_dataset, val_indices)
+        split_mode = f"random {args.val_split:.0%} (leakage-prone, use --val-dir for a real number)"
 
     idx_to_class = {v: k for k, v in class_to_idx.items()}
     mapping_path = os.path.join(MODEL_DIR, "class_mapping.json")
@@ -143,7 +164,7 @@ def main():
         json.dump(idx_to_class, f, indent=2)
 
     print(f"Classes:    {len(class_to_idx)}")
-    print(f"Val split:  random {args.val_split:.0%}")
+    print(f"Val split:  {split_mode}")
 
     train_loader = DataLoader(train_subset, batch_size=args.batch_size,
                               shuffle=True, num_workers=4, pin_memory=True)
