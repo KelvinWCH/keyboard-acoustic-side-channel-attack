@@ -9,6 +9,7 @@ import sounddevice as sd
 import librosa
 import torch
 import timm
+import requests
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -24,6 +25,9 @@ IMG_SIZE = 224
 THRESHOLD = 0.008
 MIN_GAP_SEC = 0.15
 CLIP_DURATION_SEC = 0.10
+
+CORRECTION_BUFFER_SIZE = 1000
+CORRECTION_PAUSE_SEC = 10.0
 
 
 def load_model(device):
@@ -79,8 +83,34 @@ def clip_to_spectrogram(clip):
     return Image.open(buf).convert("RGB")
 
 
+def correct_with_llm(raw_chars, ollama_host):
+    prompt = (
+        "The following characters were predicted from keyboard typing sounds "
+        "using an acoustic side-channel attack. They may contain errors. "
+        "Correct them into the most likely English text. "
+        "Output ONLY the corrected text, nothing else.\n\n"
+        f"Input: \"{raw_chars}\""
+    )
+    try:
+        response = requests.post(
+            f"{ollama_host}/api/generate",
+            json={
+                "model": "gemma4:e2b",
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.3},
+            },
+            timeout=60,
+        )
+        result = response.json()
+        return result.get("response", raw_chars).strip()
+    except Exception as e:
+        return f"[LLM error: {e}] {raw_chars}"
+
+
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--ollama-host", default="http://localhost:11434")
     parser.add_argument("--device-index", type=int, default=None)
     args = parser.parse_args()
 
@@ -98,6 +128,18 @@ def main():
     model, idx_to_class = load_model(device)
     transform = get_inference_transform()
 
+    ollama_ok = False
+    try:
+        r = requests.get(f"{args.ollama_host}/api/tags", timeout=5)
+        models = [m["name"] for m in r.json().get("models", [])]
+        if any("gemma4" in m for m in models):
+            print("Ollama: connected")
+            ollama_ok = True
+        else:
+            print(f"Ollama: gemma4 not found. Available: {models}")
+    except Exception:
+        print(f"Ollama: not reachable at {args.ollama_host}")
+
     print(f"\nThreshold: {THRESHOLD}")
     print(f"Clip duration: {CLIP_DURATION_SEC}s")
     print(f"Min gap: {MIN_GAP_SEC}s")
@@ -105,6 +147,7 @@ def main():
 
     raw_predictions = []
     last_keystroke_time = time.time()
+    corrected_output = []
     clip_queue = queue.Queue()
 
     clip_samples = int(SAMPLE_RATE * CLIP_DURATION_SEC)
@@ -194,19 +237,43 @@ def main():
                     last_keystroke_time = time.time()
 
                     print(f"\n  key: '{key}' (conf: {confidence.item():.1%}) "
-                          f"| text so far: {''.join(raw_predictions)}")
+                          f"| so far: {''.join(raw_predictions)}")
 
                 idle_time = time.time() - last_keystroke_time
-                if idle_time > 5.0 and raw_predictions:
+                should_correct = (
+                    len(raw_predictions) >= CORRECTION_BUFFER_SIZE
+                    or (len(raw_predictions) > 0
+                        and idle_time > CORRECTION_PAUSE_SEC)
+                )
+
+                if should_correct and raw_predictions:
+                    raw_text = "".join(raw_predictions)
+                    print(f"\n  sending to Gemma: \"{raw_text}\"")
+
+                    if ollama_ok:
+                        corrected = correct_with_llm(raw_text, args.ollama_host)
+                    else:
+                        corrected = raw_text + " (no LLM)"
+
+                    corrected_output.append(corrected)
+                    print(f"  corrected: \"{corrected}\"\n")
                     raw_predictions.clear()
-                    print("\n  (idle 5s, clearing buffer)")
 
                 time.sleep(0.01)
 
     except KeyboardInterrupt:
-        print("\n\nSession ended.")
         if raw_predictions:
-            print(f"Text: {''.join(raw_predictions)}")
+            raw_text = "".join(raw_predictions)
+            if ollama_ok:
+                corrected = correct_with_llm(raw_text, args.ollama_host)
+            else:
+                corrected = raw_text
+            corrected_output.append(corrected)
+            print(f"\n  {raw_text} -> {corrected}")
+
+        print("\n\nSession ended.")
+        if corrected_output:
+            print(f"Full text: {' '.join(corrected_output)}")
         else:
             print("No keystrokes detected.")
             print("If the RMS bar never spiked, your mic isn't picking up typing.")
