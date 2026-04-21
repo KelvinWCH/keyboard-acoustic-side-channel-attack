@@ -67,3 +67,32 @@ python 2_preprocess/isolate.py  --raw-dir data/raw_holdout --output-dir data/iso
 python 2_preprocess/spectrogram.py --input-dir data/isolated_holdout --output-dir data/spectrograms_holdout
 python 3_train/train.py         --val-dir data/spectrograms_holdout
 ```
+
+## Method
+
+- **Audio**: 44.1 kHz mono, 100 ms clips centered so the keystroke sits at
+  ~25% of the window.
+- **Features**: 128-band mel-spectrogram (log power, n_fft=2048, hop=512),
+  rendered as a 224x224 PNG to match the CoAtNet input size.
+- **Model**: CoAtNet-0 (`coatnet_0_rw_224` from `timm`), pretrained on
+  ImageNet, fine-tuned in two phases — 10 epochs with the backbone frozen,
+  then 54 epochs end-to-end at 0.1x LR.
+- **Augmentation**: small horizontal translation + two RandomErasing passes
+  (one blocky, one thin vertical — approximates SpecAugment on a rendered
+  spectrogram).
+- **Loss**: cross-entropy with label smoothing (0.1), AdamW, cosine LR schedule.
+- **Isolation**: the isolator binary-searches an energy threshold per
+  recording so it finds exactly ~25 presses regardless of volume variation
+  between keys.
+- **Live alignment**: the inference callback defers clip extraction until
+  ~75 ms of post-peak audio has accumulated, so the keystroke lands at 25%
+  of the window — matching the training alignment.
+
+## Results
+
+With a single recording session and a random 80/20 split, validation
+accuracy tops out at ~81%. This number is optimistic: clips from the same
+session are highly correlated, so the split measures memorization more than
+generalization. Accuracy on a separately recorded session is substantially
+lower — that's the number that actually matters for a real attack, and is
+why the `--val-dir` flag exists.
