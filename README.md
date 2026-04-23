@@ -2,7 +2,8 @@
 
 A small end-to-end project that trains a CoAtNet image classifier to recognize
 individual keys from the sound they make when pressed, then runs live inference
-on microphone input.
+on microphone input. An optional local LLM (Ollama + Gemma) cleans up the raw
+character stream into readable text.
 
 The pipeline follows the recipe from Harrison et al. (2023) — record keystrokes,
 turn each press into a mel-spectrogram image, fine-tune a pretrained CoAtNet-0,
@@ -15,8 +16,11 @@ and use the model as a real-time acoustic keylogger.
 2_preprocess/ isolate.py        split each recording into per-keystroke clips
               spectrogram.py    convert clips to 224x224 mel-spectrogram PNGs
 3_train/      train.py          fine-tune CoAtNet-0 on the spectrograms
-4_infer/      infer.py          live mic inference
+4_infer/      infer.py          live mic inference + LLM text correction
 ```
+
+Data flows through `data/raw/`, `data/isolated/`, `data/spectrograms/`, and the
+trained model lives in `models/coatnet_keystrokes.pth`.
 
 ## Setup
 
@@ -26,6 +30,11 @@ pip install -r requirements.txt
 
 Tested on Python 3.11 with CUDA 12 (RTX 4070). CPU also works but training is
 much slower.
+
+Live inference also needs:
+- A microphone close to the keyboard
+- Optional: [Ollama](https://ollama.com/) running locally with the `gemma4:e2b`
+  model if you want LLM text correction
 
 ## Usage
 
@@ -96,3 +105,26 @@ session are highly correlated, so the split measures memorization more than
 generalization. Accuracy on a separately recorded session is substantially
 lower — that's the number that actually matters for a real attack, and is
 why the `--val-dir` flag exists.
+
+## Related work
+
+- **Dai, Liu, Le, and Tan (2021).** *CoAtNet: Marrying Convolution and
+  Attention for All Data Sizes.* NeurIPS. The backbone architecture used
+  in this project — a hybrid of depthwise convolution and relative
+  self-attention. arXiv:2106.04803.
+- **Park, Ayati, and Cai (2025).** *Improving Acoustic Side-Channel Attacks
+  on Keyboards Using Transformers and Large Language Models.* arXiv
+  preprint. Uses vision transformers for keystroke classification and an
+  LLM for error correction on the predicted character stream — the same
+  two-stage setup (classifier + LLM cleanup) used here.
+  arXiv:2502.09782.
+
+## Notes and caveats
+
+- This repo is a learning project, not a research artifact. The dataset
+  is small (25 presses per key, one session) and the evaluation methodology
+  is optimistic unless you use `--val-dir` with a separate session.
+- The LLM correction step (Gemma via Ollama) is optional and helps paper
+  over recognition errors for long typed sequences. It's not part of the
+  model's accuracy number.
+- Only use this on your own keyboard and recordings.
